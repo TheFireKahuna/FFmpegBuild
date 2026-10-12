@@ -1285,7 +1285,7 @@ patch_ffmpeg_movenc_fragment_end() {
     # get_cluster_duration() sees a negative duration and av_assert0() aborts the
     # process. A queued packet behind the last written sample says nothing about where
     # the track ends, so it is skipped, and the end stays what the sample's own duration
-    # gave it.
+    # gave it. Proposed upstream as FFmpeg PR 25021.
     local F="${FFMPEG_SRC}/libavformat/movenc.c"
     if grep -q "cannot end the track before them" "${F}"; then
         return
