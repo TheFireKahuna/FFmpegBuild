@@ -1275,6 +1275,31 @@ s#(\n)(                cumul_size \+= hdr->frame_size;\n)#$1                /* t
     fi
 }
 
+patch_ffmpeg_movenc_fragment_end() {
+    # StreamX crash 2026-10-10 (AetherEngine HLS segment pump). mov_flush_fragment()
+    # fills in a track's end from the first packet still waiting in the interleaver
+    # (ff_interleaved_peek). check_pkt() may already have moved the written samples
+    # past that packet's dts: the first sample of a fragment is placed at the previous
+    # fragment's declared end, and every later one that still sits below it is clamped
+    # to the sample before plus one. The track end then lies before its last sample,
+    # get_cluster_duration() sees a negative duration and av_assert0() aborts the
+    # process. A queued packet behind the last written sample says nothing about where
+    # the track ends, so it is skipped, and the end stays what the sample's own duration
+    # gave it.
+    local F="${FFMPEG_SRC}/libavformat/movenc.c"
+    if grep -q "cannot end the track before them" "${F}"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: a queued packet behind the written samples does not end a fragment's track"
+    perl -0777 -pi -e '
+s#(                if \(track->dts_shift != AV_NOPTS_VALUE\)\n                    dts \+= track->dts_shift;\n)(                track->track_duration = dts - track->start_dts;\n)#$1                /* check_pkt() may have moved the written samples past this\n                 * packet; it cannot end the track before them. */\n                if (track->entry && dts < track->cluster[track->entry - 1].dts)\n                    continue;\n$2#;
+' "${F}"
+    if ! grep -q "cannot end the track before them" "${F}"; then
+        echo "ERROR: movenc fragment end patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1290,6 +1315,7 @@ patch_ffmpeg_vc1_parser
 patch_ffmpeg_dav1_tag
 patch_ffmpeg_mpegts_mpeg1_probe
 patch_ffmpeg_eac3_dec3
+patch_ffmpeg_movenc_fragment_end
 fetch_dav1d
 fetch_zimg
 fetch_zvbi
