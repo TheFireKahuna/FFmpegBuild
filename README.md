@@ -27,7 +27,7 @@ Full FFmpeg builds for iOS land at 40-70 MB because they bundle a TLS stack, enc
 
 | Library        | What it does                                          |
 | -------------- | ----------------------------------------------------- |
-| libavformat    | Demux MKV, MP4, WebM, MPEG-TS, MPEG-PS (VOB / DVD), HLS, AVI, ASF / WMV, OGG, FLV, plus raw elementary streams (including DTS, TrueHD and LATM AAC) |
+| libavformat    | Demux MKV, MP4, WebM, MPEG-TS, MPEG-PS (VOB / DVD), HLS, AVI, ASF / WMV, OGG, FLV, RealMedia (.rm / .rmvb), VobSub (.idx + .sub), plus raw elementary streams (including DTS, TrueHD and LATM AAC) |
 | libavcodec     | Decode video + audio (with VideoToolbox bridge)       |
 | libavutil      | Shared primitives                                     |
 | libswresample  | Audio resampling / channel remap / format convert     |
