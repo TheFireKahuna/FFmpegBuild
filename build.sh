@@ -552,7 +552,12 @@ build_zvbi_one() {
         --disable-tests \
         --disable-examples \
         --without-doxygen \
+        --without-x \
         2>&1 | tail -5
+
+    # --without-x: on a Mac with X11 libraries installed (XQuartz, or Homebrew's libx11 as some formula's
+    # dependency) configure finds them for the macOS slices, whose host matches the build machine, and links
+    # -lX11, which the SDK sysroot does not have: `ld: library 'X11' not found`. The decoder needs no X.
 
     # Only src/ holds the decoder library; test/ and examples/ are disabled above.
     make -C src -j$(sysctl -n hw.ncpu) 2>&1 | tail -3
