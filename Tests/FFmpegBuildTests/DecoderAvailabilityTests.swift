@@ -97,17 +97,6 @@ struct DecoderAvailabilityTests {
         }
     }
 
-    /// The native `.wmv` chain is all-in or all-out (FFmpegBuild#3), and since
-    /// September 2026 it is in.
-    ///
-    /// Such a file needs three things at once: the asf demuxer to open it, a video
-    /// decoder, and a decoder for whichever WMA flavour its audio track carries. With
-    /// the demuxer but without that last one, AetherEngine's `AudioCodecCompat` maps
-    /// the unrecognised id to `.unsupported` and the session drops to video-only, so
-    /// the file plays silently, which reads as a playback bug where an honest
-    /// `unsupportedCodec` would not. Every name missing below is one such file, which
-    /// is why the whole family ships and why this test lists each one instead of
-    /// trusting the configure line.
     /// RealMedia, whole for the WMA reason: the rm demuxer, RealVideo, and every RealAudio an
     /// .rm can carry. RV40 with cook is what an .rmvb from the 2000s holds.
     @Test("the RealMedia chain is whole")
@@ -128,6 +117,17 @@ struct DecoderAvailabilityTests {
         #expect(av_find_input_format("vobsub") != nil, "vobsub demuxer missing: an .idx + .sub cannot be opened")
     }
 
+    /// The native `.wmv` chain is all-in or all-out (FFmpegBuild#3), and since
+    /// September 2026 it is in.
+    ///
+    /// Such a file needs three things at once: the asf demuxer to open it, a video
+    /// decoder, and a decoder for whichever WMA flavour its audio track carries. With
+    /// the demuxer but without that last one, AetherEngine's `AudioCodecCompat` maps
+    /// the unrecognised id to `.unsupported` and the session drops to video-only, so
+    /// the file plays silently, which reads as a playback bug where an honest
+    /// `unsupportedCodec` would not. Every name missing below is one such file, which
+    /// is why the whole family ships and why this test lists each one instead of
+    /// trusting the configure line.
     @Test("the native .wmv chain is whole")
     func theNativeWmvChainIsWhole() {
         #expect(
