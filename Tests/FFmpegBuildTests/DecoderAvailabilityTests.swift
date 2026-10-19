@@ -42,6 +42,8 @@ struct DecoderAvailabilityTests {
         "movtext": "mov_text",
         "libzvbi_teletext": "libzvbi_teletextdec",
         "mpegps": "mpeg",
+        "ra_144": "real_144",
+        "ra_288": "real_288",
     ]
 
     private static func enabled(_ component: String) -> [String] {
@@ -106,6 +108,26 @@ struct DecoderAvailabilityTests {
     /// `unsupportedCodec` would not. Every name missing below is one such file, which
     /// is why the whole family ships and why this test lists each one instead of
     /// trusting the configure line.
+    /// RealMedia, whole for the WMA reason: the rm demuxer, RealVideo, and every RealAudio an
+    /// .rm can carry. RV40 with cook is what an .rmvb from the 2000s holds.
+    @Test("the RealMedia chain is whole")
+    func theRealMediaChainIsWhole() {
+        #expect(av_find_input_format("rm") != nil, "rm demuxer missing: an .rmvb cannot be opened at all")
+        for name in ["rv10", "rv20", "rv30", "rv40", "cook", "atrac3", "sipr", "ralf", "real_144", "real_288"] {
+            #expect(avcodec_find_decoder_by_name(name) != nil, "\(name) missing")
+        }
+    }
+
+    /// A feature phone's 3GP is H.263 with AMR speech; .ogv is Theora; a DVD rip's subtitles
+    /// are VobSub, an .idx beside a .sub.
+    @Test("3GP, Theora and VobSub open and decode")
+    func phoneVideoTheoraAndVobSub() {
+        for name in ["h263", "amrnb", "amrwb", "theora", "dvdsub", "pcm_dvd"] {
+            #expect(avcodec_find_decoder_by_name(name) != nil, "\(name) missing")
+        }
+        #expect(av_find_input_format("vobsub") != nil, "vobsub demuxer missing: an .idx + .sub cannot be opened")
+    }
+
     @Test("the native .wmv chain is whole")
     func theNativeWmvChainIsWhole() {
         #expect(
