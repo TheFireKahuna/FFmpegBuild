@@ -68,7 +68,7 @@ Output lands in `Sources/` as xcframeworks, ready to consume via Swift Package M
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "3.8.0")
+    .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "3.9.0")
 ]
 
 // Target:
