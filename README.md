@@ -144,6 +144,18 @@ Symbols and binaries are a pair per build. A dSYM from one release symbolicates 
 - **`patch_ffmpeg_dca_x_heights`** (`patches/dca-xll-x-heights.patch`): the `dca` decoder decodes the height channels of DTS:X's standard presentation. They travel in a regular XLL channel set at the end of every lossless frame, behind the syncword upstream already recognises (it sets the "DTS-HD MA + DTS:X" profile) and then skips; the encoder also folds each of them at -3 dB into the 7.1 bed speaker under it. With the new decoder option `x_heights` (off by default) the decoder reads that channel set with FFmpeg's own XLL code, outputs 7.1.4 and removes the fold from the bed at output resolution. Without the option, and for every stream without the extension, the output is byte-identical to upstream (checked against FATE's DTS suite with and without downmix). A frame whose extension does not decode keeps 7.1.4 with silent heights. The alternate presentations, which carry objects, are left at their 7.1. This replaces LibDTSX in AetherEngine (#798), whose port of this decoder combined with Apache-2.0 code came out LGPL-3.0-or-later.
 - **`patch_ffmpeg_matroska_tts`**: `matroskadec.c` logs a warning when a Matroska track carries a `TrackTimestampScale` other than 1.0. Timestamp behavior stays exactly as upstream implements it, which is what RFC 9559 specifies (block timestamps and BlockDuration are Track Ticks). The element is deprecated (maxver 3) and many readers ignore it, so a file carrying it may have been authored against such readers and mistime silently; the warning surfaces that condition (AetherEngine issue 145). Until 2.1.x this patch clamped TTS to 1.0; the clamp rested on a wrong reading of the RFC and was dropped after upstream review (FFmpeg PR 23852).
 
+## Build record
+
+The binaries are built on a local Mac, not in CI, so there is no attestation. Instead every build writes `BUILD-INFO.txt`, committed with the binaries it describes:
+
+- the upstream tag and resolved commit of FFmpeg, dav1d, zimg and libzvbi, and a SHA-256 over the changes the patch functions made to each tree (tracked edits plus added files such as the libzvbi stub),
+- the SHA-256 of `build.sh` and of every file in `patches/`,
+- macOS, Xcode, clang and SDK versions, and the versions of meson, ninja, autotools and pkg-config,
+- FFmpeg's configure line for every slice, as recorded in its `config.h`,
+- the SHA-256 of every shipped binary.
+
+The inputs are captured right after patching, before anything compiles, so `./build.sh package` does not credit the current toolchain with older objects. Releases up to 3.9.0 have no build record; for those, the toolchain can still be read from the binaries (`LC_BUILD_VERSION`) and their dSYMs (`DW_AT_producer`). A rebuild from the same inputs is not expected to be byte-identical.
+
 ## Keeping the pins current
 
 The versions this package builds are shell variables in `build.sh`, not a manifest, so no dependency bot sees them. `Scripts/check-upstream.py` compares all five (FFmpeg, dav1d, zimg, libzvbi, and `dolby_vision` over in [LibDovi](https://github.com/superuser404notfound/LibDovi)) against what upstream has published:
