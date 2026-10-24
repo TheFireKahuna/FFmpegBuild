@@ -1,0 +1,211 @@
+hwcontext_videotoolbox, avfilter/yadif_videotoolbox: caller pixel buffer attributes
+
+AVVTFramesContext gains pixel_buffer_attributes, a CFDictionaryRef of extra
+CVPixelBuffer attributes the frames context's pool makes its pictures with
+(Metal compatibility, the attributes a display layer recommends). The pixel
+format, width and height still come from the frames context, and the empty
+IOSurface properties dictionary is set when the caller's dictionary does
+not carry one. The frames context owns one reference and releases it in
+frames_uninit.
+
+yadif_videotoolbox copies the attributes from its input frames context to
+the output frames context it creates, so its output pictures are made as
+the caller made its input pictures, and a caller can display them without
+copying them into buffers of its own.
+
+yadif_videotoolbox also checks its pixel format when it configures its
+output. A plane layout the kernel has no texture format for was logged in
+filter() for every frame, and the frame left unwritten; it now fails
+configuration with ENOSYS. The texture format comes from one function used
+by both.
+diff --git a/libavfilter/vf_yadif_videotoolbox.m b/libavfilter/vf_yadif_videotoolbox.m
+index 4701fd0..2fe836d 100644
+--- a/libavfilter/vf_yadif_videotoolbox.m
++++ b/libavfilter/vf_yadif_videotoolbox.m
+@@ -102,6 +102,21 @@ static void call_kernel(AVFilterContext *ctx,
+       // is the single balanced release. See FFmpegBuild build.sh patch_ffmpeg.
+ }
+ 
++/* The texture format a component's plane is read and written as, or
++ * MTLPixelFormatInvalid for a layout the kernel does not take. */
++static MTLPixelFormat plane_format(const AVComponentDescriptor *comp, int *channels)
++    API_AVAILABLE(macos(10.11), ios(8.0))
++{
++    int pixel_size = (comp->depth + comp->shift) / 8;
++
++    *channels = pixel_size ? comp->step / pixel_size : 0;
++    if (pixel_size == 1 && *channels == 1) return MTLPixelFormatR8Unorm;
++    if (pixel_size == 1 && *channels == 2) return MTLPixelFormatRG8Unorm;
++    if (pixel_size == 2 && *channels == 1) return MTLPixelFormatR16Unorm;
++    if (pixel_size == 2 && *channels == 2) return MTLPixelFormatRG16Unorm;
++    return MTLPixelFormatInvalid;
++}
++
+ static void filter(AVFilterContext *ctx, AVFrame *dst,
+                    int parity, int tff) API_AVAILABLE(macos(10.11), ios(8.0))
+ {
+@@ -110,7 +125,7 @@ static void filter(AVFilterContext *ctx, AVFrame *dst,
+     int i;
+ 
+     for (i = 0; i < y->csp->nb_components; i++) {
+-        int pixel_size, channels;
++        int channels;
+         const AVComponentDescriptor *comp = &y->csp->comp[i];
+         CVMetalTextureRef prev, cur, next, dest;
+         id<MTLTexture> tex_prev, tex_cur, tex_next, tex_dest;
+@@ -122,26 +137,11 @@ static void filter(AVFilterContext *ctx, AVFrame *dst,
+             continue;
+         }
+ 
+-        pixel_size = (comp->depth + comp->shift) / 8;
+-        channels = comp->step / pixel_size;
+-        if (pixel_size > 2 || channels > 2) {
+-            av_log(ctx, AV_LOG_ERROR, "Unsupported pixel format: %s\n", y->csp->name);
+-            goto exit;
+-        }
+-        switch (pixel_size) {
+-        case 1:
+-            format = channels == 1 ? MTLPixelFormatR8Unorm : MTLPixelFormatRG8Unorm;
+-            break;
+-        case 2:
+-            format = channels == 1 ? MTLPixelFormatR16Unorm : MTLPixelFormatRG16Unorm;
+-            break;
+-        default:
+-            av_log(ctx, AV_LOG_ERROR, "Unsupported pixel format: %s\n", y->csp->name);
+-            goto exit;
+-        }
++        // do_config_output() refused every format this has no texture format for.
++        format = plane_format(comp, &channels);
+         av_log(ctx, AV_LOG_TRACE,
+-               "Deinterlacing plane %d: pixel_size: %d channels: %d\n",
+-               comp->plane, pixel_size, channels);
++               "Deinterlacing plane %d: channels: %d\n",
++               comp->plane, channels);
+ 
+         prev = ff_metal_texture_from_pixbuf(ctx, s->textureCache, (CVPixelBufferRef)y->prev->data[3], i, format);
+         cur  = ff_metal_texture_from_pixbuf(ctx, s->textureCache, (CVPixelBufferRef)y->cur->data[3], i, format);
+@@ -167,9 +167,6 @@ static void filter(AVFilterContext *ctx, AVFrame *dst,
+     if (y->current_field == YADIF_FIELD_END) {
+         y->current_field = YADIF_FIELD_NORMAL;
+     }
+-
+-exit:
+-    return;
+ }
+ 
+ static av_cold void do_uninit(AVFilterContext *ctx) API_AVAILABLE(macos(10.11), ios(8.0))
+@@ -327,6 +324,8 @@ static int do_config_output(AVFilterLink *link) API_AVAILABLE(macos(10.11), ios(
+     FilterLink *l = ff_filter_link(link);
+     FilterLink *il = ff_filter_link(link->src->inputs[0]);
+     AVHWFramesContext *output_frames, *input_frames;
++    AVVTFramesContext *output_vt, *input_vt;
++    const AVPixFmtDescriptor *desc;
+     AVFilterContext *ctx = link->src;
+     YADIFVTContext *s = ctx->priv;
+     YADIFContext *y = &s->yadif;
+@@ -355,7 +354,22 @@ static int do_config_output(AVFilterLink *link) API_AVAILABLE(macos(10.11), ios(
+     output_frames->sw_format = s->input_frames->sw_format;
+     output_frames->width     = ctx->inputs[0]->w;
+     output_frames->height    = ctx->inputs[0]->h;
+-    ((AVVTFramesContext *)output_frames->hwctx)->color_range = ((AVVTFramesContext *)input_frames->hwctx)->color_range;
++    output_vt = output_frames->hwctx;
++    input_vt  = input_frames->hwctx;
++    output_vt->color_range = input_vt->color_range;
++    // The output pictures are made as the caller made the input pictures.
++    if (input_vt->pixel_buffer_attributes)
++        output_vt->pixel_buffer_attributes = CFRetain(input_vt->pixel_buffer_attributes);
++
++    desc = av_pix_fmt_desc_get(output_frames->sw_format);
++    for (int i = 0; i < desc->nb_components; i++) {
++        int channels;
++        if (plane_format(&desc->comp[i], &channels) == MTLPixelFormatInvalid) {
++            av_log(ctx, AV_LOG_ERROR, "Unsupported pixel format: %s\n", desc->name);
++            ret = AVERROR(ENOSYS);
++            goto exit;
++        }
++    }
+ 
+     ret = ff_filter_init_hw_frames(ctx, link, 10);
+     if (ret < 0)
+diff --git a/libavutil/hwcontext_videotoolbox.c b/libavutil/hwcontext_videotoolbox.c
+index 2764097..8e4ae28 100644
+--- a/libavutil/hwcontext_videotoolbox.c
++++ b/libavutil/hwcontext_videotoolbox.c
+@@ -195,11 +195,16 @@ static int vt_pool_alloc(AVHWFramesContext *ctx)
+     uint32_t cv_pixfmt;
+     CFMutableDictionaryRef attributes, iosurface_properties;
+ 
+-    attributes = CFDictionaryCreateMutable(
+-        NULL,
+-        2,
+-        &kCFTypeDictionaryKeyCallBacks,
+-        &kCFTypeDictionaryValueCallBacks);
++    if (hw_ctx->pixel_buffer_attributes)
++        attributes = CFDictionaryCreateMutableCopy(NULL, 0, hw_ctx->pixel_buffer_attributes);
++    else
++        attributes = CFDictionaryCreateMutable(
++            NULL,
++            2,
++            &kCFTypeDictionaryKeyCallBacks,
++            &kCFTypeDictionaryValueCallBacks);
++    if (!attributes)
++        return AVERROR(ENOMEM);
+ 
+     cv_pixfmt = vt_format_from_pixfmt(ctx->sw_format, hw_ctx->color_range);
+     pixfmt = CFNumberCreate(NULL, kCFNumberSInt32Type, &cv_pixfmt);
+@@ -209,13 +214,15 @@ static int vt_pool_alloc(AVHWFramesContext *ctx)
+         pixfmt);
+     CFRelease(pixfmt);
+ 
+-    iosurface_properties = CFDictionaryCreateMutable(
+-        NULL,
+-        0,
+-        &kCFTypeDictionaryKeyCallBacks,
+-        &kCFTypeDictionaryValueCallBacks);
+-    CFDictionarySetValue(attributes, kCVPixelBufferIOSurfacePropertiesKey, iosurface_properties);
+-    CFRelease(iosurface_properties);
++    if (!CFDictionaryContainsKey(attributes, kCVPixelBufferIOSurfacePropertiesKey)) {
++        iosurface_properties = CFDictionaryCreateMutable(
++            NULL,
++            0,
++            &kCFTypeDictionaryKeyCallBacks,
++            &kCFTypeDictionaryValueCallBacks);
++        CFDictionarySetValue(attributes, kCVPixelBufferIOSurfacePropertiesKey, iosurface_properties);
++        CFRelease(iosurface_properties);
++    }
+ 
+     w = CFNumberCreate(NULL, kCFNumberSInt32Type, &ctx->width);
+     h = CFNumberCreate(NULL, kCFNumberSInt32Type, &ctx->height);
+@@ -277,6 +284,10 @@ static void vt_frames_uninit(AVHWFramesContext *ctx)
+         CVPixelBufferPoolRelease(fctx->pool);
+         fctx->pool = NULL;
+     }
++    if (fctx->p.pixel_buffer_attributes) {
++        CFRelease(fctx->p.pixel_buffer_attributes);
++        fctx->p.pixel_buffer_attributes = NULL;
++    }
+ }
+ 
+ static int vt_frames_init(AVHWFramesContext *ctx)
+diff --git a/libavutil/hwcontext_videotoolbox.h b/libavutil/hwcontext_videotoolbox.h
+index d35cfbb..96c4572 100644
+--- a/libavutil/hwcontext_videotoolbox.h
++++ b/libavutil/hwcontext_videotoolbox.h
+@@ -44,6 +44,17 @@
+ 
+ typedef struct AVVTFramesContext {
+     enum AVColorRange color_range;
++    /**
++     * Additional CVPixelBuffer attributes for the pictures the frames context's
++     * pool makes (a CFDictionaryRef, for example kCVPixelBufferMetalCompatibilityKey).
++     * The pixel format, width and height always come from the frames context;
++     * kCVPixelBufferIOSurfacePropertiesKey is set to an empty dictionary when this
++     * does not carry it.
++     *
++     * Set by the caller before av_hwframe_ctx_init(). The frames context owns
++     * one reference and releases it when it is freed.
++     */
++    CFDictionaryRef pixel_buffer_attributes;
+ } AVVTFramesContext;
+ 
+ /**
