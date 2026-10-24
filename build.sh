@@ -320,6 +320,24 @@ s#(\n    if \(probesize\)\n        estimate_timings\(ic, old_offset\);\n)#\n    
     fi
 }
 
+patch_ffmpeg_bluray_20bit() {
+    # Blu-ray LPCM at 20 bits per sample decodes. The format stores 20-bit samples in the same 24-bit
+    # words as 24-bit ones, and pcm-bluray.c already reads the depth from the header (its table lists
+    # 20) and reads three bytes per sample for anything that is not 16-bit, but then refuses 20 by name
+    # ("unsupported sample depth (20)"), so such a track never produced a frame and probing read no
+    # parameters from it. Accepted now, it decodes through the 24-bit path with bits_per_raw_sample 20.
+    local F="${FFMPEG_SRC}/libavcodec/pcm-bluray.c"
+    grep -q "AetherEngine bluray 20-bit" "${F}" && return
+    echo "→ Patching FFmpeg: Blu-ray LPCM decodes 20-bit samples"
+    perl -0777 -pi -e '
+s#    if \(!\(avctx->bits_per_coded_sample == 16 \|\| avctx->bits_per_coded_sample == 24\)\) \{#    /* AetherEngine bluray 20-bit: 20-bit samples sit in 24-bit words, read\n     * as 24-bit ones are. See FFmpegBuild build.sh patch_ffmpeg_bluray_20bit. */\n    if (!(avctx->bits_per_coded_sample == 16 || avctx->bits_per_coded_sample == 20 ||\n          avctx->bits_per_coded_sample == 24)) {#;
+' "${F}"
+    if ! grep -q "AetherEngine bluray 20-bit" "${F}"; then
+        echo "ERROR: Blu-ray 20-bit patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
 patch_ffmpeg_dav1_tag() {
     # AetherEngine #547. MP4RA registers 'dav1' as the AV1 sample entry that signals
     # Dolby Vision, and Apple's HLS authoring spec requires it for Dolby Vision
@@ -1565,6 +1583,7 @@ patch_ffmpeg_visionos
 patch_ffmpeg_matroska_tts
 patch_ffmpeg_matroska_track_id
 patch_ffmpeg_generated_start_time
+patch_ffmpeg_bluray_20bit
 patch_ffmpeg_vc1_parser
 patch_ffmpeg_dav1_tag
 patch_ffmpeg_mpegts_mpeg1_probe
