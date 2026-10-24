@@ -800,7 +800,13 @@ COMMON_FLAGS=(
     # carry in their VOBs; Blu-ray LPCM is pcm_bluray below.
     --enable-decoder=pcm_dvd
     --enable-decoder=aac --enable-decoder=aac_latm --enable-decoder=ac3
-    --enable-decoder=eac3 --enable-decoder=flac --enable-decoder=mp3
+    --enable-decoder=eac3 --enable-decoder=flac
+    # MPEG audio decodes on the floating-point decoders only (mp3float here, mp2float
+    # below). The fixed-point ones carry their synthesis filter's rounding error from
+    # frame to frame (`dither_state`), so a decode started anywhere never meets a
+    # continuous one; the float ones meet it within a few frames (measured over 60
+    # starts: MP2 never, MP3 on mp3float within 102 ms). With only one per codec, the
+    # codec id resolves to it.
     --enable-decoder=mp3float --enable-decoder=opus --enable-decoder=vorbis
     --enable-decoder=truehd --enable-decoder=mlp --enable-decoder=dca --enable-decoder=alac
     --enable-decoder=pcm_s16le --enable-decoder=pcm_s24le --enable-decoder=pcm_f32le
@@ -822,7 +828,7 @@ COMMON_FLAGS=(
     # MP2 (MPEG-1 Layer II) decoder for DVD-remux audio tracks that
     # still carry MP2. Not legal in fMP4 so AetherEngine's AudioBridge
     # decodes to PCM and re-encodes as FLAC. ~5 KB binary cost.
-    --enable-decoder=mp2
+    --enable-decoder=mp2float
     --enable-decoder=ass --enable-decoder=srt --enable-decoder=subrip
     --enable-decoder=movtext --enable-decoder=dvdsub --enable-decoder=dvbsub
     --enable-decoder=pgssub --enable-decoder=webvtt
