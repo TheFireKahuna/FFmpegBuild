@@ -837,6 +837,12 @@ COMMON_FLAGS=(
     # tvOS doesn't expose LPCM-side audio passthrough that the
     # lossless was actually delivering on most setups anyway.
     --enable-encoder=eac3
+    # AAC (LC) and ALAC, plus the AC-3 encoder E-AC-3 already pulls in:
+    # AetherEngine pads a stream-copied track whose audio ends before its
+    # video with silence in the track's own codec (AetherEngine#847),
+    # because AVPlayer ends an item the moment its audio runs out. Both
+    # are FFmpeg's native encoders, no external library.
+    --enable-encoder=aac --enable-encoder=alac
 )
 
 build_one() {
