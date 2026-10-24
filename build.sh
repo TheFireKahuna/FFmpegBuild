@@ -913,6 +913,11 @@ COMMON_FLAGS=(
     # because AVPlayer ends an item the moment its audio runs out. Both
     # are FFmpeg's native encoders, no external library.
     --enable-encoder=aac --enable-encoder=alac
+    # 16- and 24-bit little-endian PCM: AetherEngine's lossless bridge hands
+    # tvOS the PCM it decoded, muxed as ISO/IEC 23003-5 `ipcm` (which AVPlayer
+    # plays from HLS fMP4), instead of re-encoding it to FLAC for tvOS to
+    # decode straight back. Encoding PCM is packing the samples.
+    --enable-encoder=pcm_s16le --enable-encoder=pcm_s24le
 )
 
 build_one() {
