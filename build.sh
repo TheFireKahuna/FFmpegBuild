@@ -274,6 +274,24 @@ s#        if \(track->time_scale < 0\.01\) \{\n            av_log\(matroska->ctx
     fi
 }
 
+patch_ffmpeg_matroska_track_id() {
+    # A Matroska stream carries its TrackNumber in AVStream.id, as the mov and mpegts demuxers
+    # already carry their track ID and PID. matroskadec creates its streams in TrackEntry order but
+    # leaves id at 0, so a reader of the file's own structures (the Cues, which list every block by
+    # TrackNumber) could only infer which stream a track became by replaying libavformat's rules for
+    # skipping a TrackEntry. AetherEngine reads a file's subtitle blocks from its Cues.
+    local F="${FFMPEG_SRC}/libavformat/matroskadec.c"
+    grep -q "AetherEngine matroska track id" "${F}" && return
+    echo "→ Patching FFmpeg: matroska streams carry their TrackNumber in AVStream.id"
+    perl -0777 -pi -e '
+s#(        st = track->stream = avformat_new_stream\(s, NULL\);\n        if \(!st\) \{\n            av_free\(key_id_base64\);\n            return AVERROR\(ENOMEM\);\n        \}\n)#$1        /* AetherEngine matroska track id: the stream carries its TrackNumber,\n         * as mov and mpegts carry their track ID and PID. See FFmpegBuild\n         * build.sh patch_ffmpeg_matroska_track_id. */\n        st->id = (int)track->num;\n#;
+' "${F}"
+    if ! grep -q "AetherEngine matroska track id" "${F}"; then
+        echo "ERROR: matroska track id patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
 patch_ffmpeg_dav1_tag() {
     # AetherEngine #547. MP4RA registers 'dav1' as the AV1 sample entry that signals
     # Dolby Vision, and Apple's HLS authoring spec requires it for Dolby Vision
@@ -1476,6 +1494,7 @@ patch_ffmpeg
 patch_ffmpeg_pgssub
 patch_ffmpeg_visionos
 patch_ffmpeg_matroska_tts
+patch_ffmpeg_matroska_track_id
 patch_ffmpeg_vc1_parser
 patch_ffmpeg_dav1_tag
 patch_ffmpeg_mpegts_mpeg1_probe
