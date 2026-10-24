@@ -338,6 +338,46 @@ s#    if \(!\(avctx->bits_per_coded_sample == 16 \|\| avctx->bits_per_coded_samp
     fi
 }
 
+patch_ffmpeg_dvd_lpcm_alignment() {
+    # DVD LPCM decodes from wherever a read starts. A DVD LPCM packet's sample blocks straddle packets;
+    # the decoder carries a block's head over to the next packet, and the PES header's first access
+    # unit pointer says where the packet's first whole access unit begins. mpeg.c skipped the pointer
+    # with the rest of the private-stream header, so a decoder opened or flushed at a packet that
+    # starts mid-block read every block from the wrong byte (16-bit stereo: left and right swapped;
+    # 20/24-bit: noise) for as long as it ran, and a flush kept the block carried over from before
+    # the seek. Now:
+    # - mpeg.c hands the pointer on as AV_PKT_DATA_STRINGS_METADATA "first_access_unit_pointer";
+    # - pcm-dvd.c starts a fresh run (opened or flushed; .flush is new) at the packet's first whole
+    #   block, waits for a packet in which an access unit starts if the first has none, and stamps
+    #   each frame at its first sample: the PES time is the access unit's, which sits behind the
+    #   carried-over or skipped bytes.
+    # FFmpeg's own DVD muxer (not built here) writes the pointer as 4 whatever the packet holds, so
+    # a stream it made straddling blocks says its blocks start where they do not.
+    local D="${FFMPEG_SRC}/libavformat/mpeg.c" C="${FFMPEG_SRC}/libavcodec/pcm-dvd.c"
+    grep -q "AetherEngine dvd lpcm alignment" "${D}" && return
+    echo "→ Patching FFmpeg: DVD LPCM decodes from any packet"
+    perl -0777 -pi -e '
+s#(    int pcm_dvd = 0;\n)#$1    int lpcm_first_au = -1; /* AetherEngine dvd lpcm alignment */\n#;
+s#            /\* audio: skip header \*/\n            avio_skip\(s->pb, 3\);\n#            /* audio: skip header; a DVD LPCM packet keeps its first access unit pointer\n             * (see FFmpegBuild build.sh patch_ffmpeg_dvd_lpcm_alignment) */\n            if (startcode >= 0xa0 && startcode <= 0xaf) {\n                avio_skip(s->pb, 1);\n                lpcm_first_au = avio_rb16(s->pb);\n            } else\n                avio_skip(s->pb, 3);\n#;
+s#(    ret = av_get_packet\(s->pb, pkt, len\);\n)#$1    if (ret >= 0 && lpcm_first_au >= 0 && st->codecpar->codec_id == AV_CODEC_ID_PCM_DVD) {\n        AVDictionary *meta = NULL;\n        uint8_t *side;\n        size_t side_size;\n        av_dict_set_int(&meta, "first_access_unit_pointer", lpcm_first_au, 0);\n        side = av_packet_pack_dictionary(meta, &side_size);\n        av_dict_free(&meta);\n        if (side && av_packet_add_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA, side, side_size) < 0)\n            av_free(side);\n    }\n#;
+' "${D}"
+    perl -0777 -pi -e '
+s#(\#include "avcodec.h"\n)#\#include <stdlib.h>\n\n\#include "libavutil/dict.h"\n$1#;
+s#(    int extra_sample_count;  // Number of leftover samples in the buffer\n)#$1    int aligned;             // AetherEngine dvd lpcm alignment: the run has found its first whole block\n#;
+s#(static int pcm_dvd_decode_frame\(AVCodecContext \*avctx, AVFrame \*frame,\n)#static av_cold void pcm_dvd_decode_flush(AVCodecContext *avctx)\n{\n    PCMDVDContext *s = avctx->priv_data;\n\n    s->extra_sample_count = 0;\n    s->aligned            = 0;\n}\n\n/* The packet\x27s first access unit pointer (mpeg.c): -1 when the packet carries none. */\nstatic int pcm_dvd_first_access_unit(const AVPacket *avpkt)\n{\n    size_t size;\n    const uint8_t *side = av_packet_get_side_data(avpkt, AV_PKT_DATA_STRINGS_METADATA, &size);\n    AVDictionary *meta = NULL;\n    const AVDictionaryEntry *e;\n    int pointer = -1;\n\n    if (side && av_packet_unpack_dictionary(side, size, &meta) >= 0 &&\n        (e = av_dict_get(meta, "first_access_unit_pointer", NULL, 0)))\n        pointer = atoi(e->value);\n    av_dict_free(&meta);\n    return pointer;\n}\n\n$1#;
+s#(    src      \+= 3;\n    buf_size -= 3;\n)#$1\n    /* Where the first access unit begins among the samples (the pointer counts from the byte\n     * after it, and the 3-byte header comes first); -1 when unknown. A fresh run starts at the\n     * first whole block, found from it. */\n    first_au = pcm_dvd_first_access_unit(avpkt);\n    lead     = first_au >= 4 && first_au - 4 <= buf_size ? first_au - 4 : -1;\n    if (!s->aligned) {\n        if (first_au < 0) {\n            s->aligned = 1;\n        } else if (lead < 0) {\n            return avpkt->size;\n        } else {\n            int skip = lead % s->block_size;\n            src      += skip;\n            buf_size -= skip;\n            lead     -= skip;\n            s->aligned = 1;\n        }\n    }\n    carried = s->extra_sample_count;\n#;
+s#(    if \(\(retval = ff_get_buffer\(avctx, frame, 0\)\) < 0\)\n        return retval;\n    dst = frame->data\[0\];\n)#$1\n    /* The PES time is the access unit\x27s; the frame begins at the carried-over block or the\n     * first whole one, that many samples ahead of it. */\n    if (lead >= 0 && frame->pts != AV_NOPTS_VALUE && avctx->pkt_timebase.num && avctx->sample_rate)\n        frame->pts -= av_rescale_q((carried + lead) / s->block_size * s->samples_per_block,\n                                   (AVRational){ 1, avctx->sample_rate }, avctx->pkt_timebase);\n#;
+s#(    int retval;\n    int blocks;\n    void \*dst;\n)#$1    int first_au, lead, carried;\n#;
+s#(    FF_CODEC_DECODE_CB\(pcm_dvd_decode_frame\),\n)#$1    .flush          = pcm_dvd_decode_flush,\n#;
+' "${C}"
+    if ! grep -q "AetherEngine dvd lpcm alignment" "${D}" || ! grep -q "pcm_dvd_decode_flush" "${C}" \
+        || ! grep -q "first_au = pcm_dvd_first_access_unit" "${C}" \
+        || ! grep -q "frame->pts -= av_rescale_q" "${C}" || ! grep -q "libavutil/dict.h" "${C}" || ! grep -q "lpcm_first_au = avio_rb16" "${D}"; then
+        echo "ERROR: DVD LPCM alignment patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
 patch_ffmpeg_dav1_tag() {
     # AetherEngine #547. MP4RA registers 'dav1' as the AV1 sample entry that signals
     # Dolby Vision, and Apple's HLS authoring spec requires it for Dolby Vision
@@ -1589,6 +1629,7 @@ patch_ffmpeg_matroska_tts
 patch_ffmpeg_matroska_track_id
 patch_ffmpeg_generated_start_time
 patch_ffmpeg_bluray_20bit
+patch_ffmpeg_dvd_lpcm_alignment
 patch_ffmpeg_vc1_parser
 patch_ffmpeg_dav1_tag
 patch_ffmpeg_mpegts_mpeg1_probe
