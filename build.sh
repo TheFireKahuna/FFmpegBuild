@@ -1636,6 +1636,41 @@ patch_ffmpeg_matroska_byte_seek_done() {
     }
 }
 
+patch_ffmpeg_libdav1d_get_buffer2() {
+    # libdav1d pictures through the caller's get_buffer2() (AetherEngine's zero-copy software
+    # decode). The wrapper allocates every picture from a private pool and does not declare
+    # AV_CODEC_CAP_DR1, so a caller wanting the picture in its own memory (GPU-visible
+    # buffers) had to copy each frame. With a caller's get_buffer2() installed, the allocator
+    # asks it for the picture at libdav1d's 128-aligned size and checks libdav1d's alignment
+    # contract; without one the pool is used as before. The patch header explains the rest.
+    local P="${SCRIPT_DIR}/patches/libdav1d-get-buffer2.patch"
+    if grep -q 'libdav1d_get_buffer(' "${FFMPEG_SRC}/libavcodec/libdav1d.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: libdav1d allocates through get_buffer2()"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: libdav1d get_buffer2 patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
+patch_ffmpeg_vt_pixel_buffer_attributes() {
+    # AVVTFramesContext.pixel_buffer_attributes: extra CVPixelBuffer attributes for the frames
+    # context's pool, which yadif_videotoolbox copies from its input to its output, so its
+    # output pictures are made like the caller's input and can be displayed without a copy.
+    # yadif_videotoolbox also refuses a format it cannot texture at configuration instead of
+    # leaving every frame unwritten. Applies after patch_ffmpeg (same file).
+    local P="${SCRIPT_DIR}/patches/videotoolbox-pixel-buffer-attributes.patch"
+    if grep -q 'pixel_buffer_attributes' "${FFMPEG_SRC}/libavutil/hwcontext_videotoolbox.h"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: VideoToolbox frames context pixel buffer attributes"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: VideoToolbox pixel buffer attributes patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1658,6 +1693,8 @@ patch_ffmpeg_dca_x_heights
 patch_ffmpeg_av1_delayed_rap
 patch_ffmpeg_matroska_skip_attachments
 patch_ffmpeg_matroska_byte_seek_done
+patch_ffmpeg_libdav1d_get_buffer2
+patch_ffmpeg_vt_pixel_buffer_attributes
 fetch_dav1d
 fetch_zimg
 fetch_zvbi
