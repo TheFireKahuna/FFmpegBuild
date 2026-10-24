@@ -9,17 +9,19 @@ import AetherLibavcodec
 /// AVPlayer ends an item the moment its audio runs out, so the fill has to be in
 /// the track's own codec. A missing encoder there does not fail anything, the
 /// engine logs it and the tail is lost again, which is why it is pinned here.
+/// The PCM encoders write the bridge's lossless output, which AetherEngine muxes
+/// as `ipcm`.
 struct EncoderAvailabilityTests {
 
     @Test("Every encoder the engine relies on is in the binary",
-          arguments: ["flac", "eac3", "ac3", "aac", "alac"])
+          arguments: ["flac", "eac3", "ac3", "aac", "alac", "pcm_s16le", "pcm_s24le"])
     func encoderShips(name: String) {
         #expect(avcodec_find_encoder_by_name(name) != nil, "\(name) encoder missing")
     }
 
     @Test("The build carries no encoder beyond the allowlist")
     func noOtherEncoders() {
-        let allowed: Set<String> = ["flac", "eac3", "ac3", "aac", "alac"]
+        let allowed: Set<String> = ["flac", "eac3", "ac3", "aac", "alac", "pcm_s16le", "pcm_s24le"]
         var opaque: UnsafeMutableRawPointer?
         var found: [String] = []
         while let codec = av_codec_iterate(&opaque) {
