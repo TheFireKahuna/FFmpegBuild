@@ -179,4 +179,18 @@ struct DecoderAvailabilityTests {
             )
         }
     }
+
+    /// MP2 and MP3 decode on the floating-point MPEG audio decoders: the fixed-point ones carry
+    /// their synthesis filter's rounding error from frame to frame, so a decode started after a
+    /// seek never meets a continuous one, and only one decoder per codec is built so the codec id
+    /// cannot resolve to the other.
+    @Test("MPEG audio resolves to the floating-point decoders")
+    func mpegAudioDecodesInFloat() {
+        for (id, name) in [(AV_CODEC_ID_MP2, "mp2float"), (AV_CODEC_ID_MP3, "mp3float")] {
+            let decoder = avcodec_find_decoder(id)
+            #expect(decoder.map { String(cString: $0.pointee.name) } == name)
+        }
+        #expect(avcodec_find_decoder_by_name("mp2") == nil)
+        #expect(avcodec_find_decoder_by_name("mp3") == nil)
+    }
 }
