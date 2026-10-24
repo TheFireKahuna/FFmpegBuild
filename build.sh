@@ -292,6 +292,34 @@ s#(        st = track->stream = avformat_new_stream\(s, NULL\);\n        if \(!s
     fi
 }
 
+patch_ffmpeg_generated_start_time() {
+    # A stream whose packets carry no timestamps (WAV, W64, raw ADTS AAC) is numbered by libavformat's
+    # core from RELATIVE_TS_BASE, which av_read_frame() takes off, so its first packet comes out at 0.
+    # update_initial_timestamps() records AVStream.start_time only from a container's own timestamp,
+    # so such a stream is left with none, and a reader that lays a timeline from the stream's start
+    # (AetherEngine places decoded audio on the grid its frames sit on from there) has nothing to lay
+    # it from. After probing, a stream whose packets the core numbered and never anchored gets the start
+    # its packets carry; a stream probing saw no packet of is left alone, since its timestamps may just
+    # not have arrived; a real timestamp that does arrive later replaces the generated start.
+    local D="${FFMPEG_SRC}/libavformat/demux.c"
+    local I="${FFMPEG_SRC}/libavformat/internal.h"
+    grep -q "AetherEngine generated start time" "${D}" && return
+    echo "→ Patching FFmpeg: a stream numbered by the demux core records the start its packets carry"
+    perl -0777 -pi -e '
+s#(    int64_t first_dts;\n    int64_t cur_dts;\n)#$1\n    /**\n     * AetherEngine generated start time: start_time was recorded from the\n     * core'"'"'s own numbering, not a container timestamp, and a container\n     * timestamp replaces it. See FFmpegBuild build.sh\n     * patch_ffmpeg_generated_start_time.\n     */\n    int start_time_generated;\n#;
+' "${I}"
+    perl -0777 -pi -e '
+s#        if \(st->start_time == AV_NOPTS_VALUE && pktl_it->pkt.pts != AV_NOPTS_VALUE\) \{\n            st->start_time = pktl_it->pkt.pts;#        if ((st->start_time == AV_NOPTS_VALUE || sti->start_time_generated) && pktl_it->pkt.pts != AV_NOPTS_VALUE) {\n            sti->start_time_generated = 0;\n            st->start_time = pktl_it->pkt.pts;#;
+s#    if \(st->start_time == AV_NOPTS_VALUE\) \{\n        if \(st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO \|\| !\(pkt->flags & AV_PKT_FLAG_DISCARD\)\) \{#    if (st->start_time == AV_NOPTS_VALUE || sti->start_time_generated) {\n        sti->start_time_generated = 0;\n        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO || !(pkt->flags & AV_PKT_FLAG_DISCARD)) {#;
+s#(\n    if \(probesize\)\n        estimate_timings\(ic, old_offset\);\n)#\n    /* AetherEngine generated start time: a stream whose packets carry no\n     * timestamps is numbered by the core from RELATIVE_TS_BASE, which\n     * av_read_frame() takes off, so its first packet is 0, but\n     * update_initial_timestamps() records a start only from a container\n     * timestamp. Record the one its packets carry. A stream probing saw no\n     * packet of is left alone, and a container timestamp that arrives later\n     * replaces this one. See FFmpegBuild build.sh\n     * patch_ffmpeg_generated_start_time. */\n    for (unsigned i = 0; i < ic->nb_streams; i++) {\n        AVStream *const st  = ic->streams[i];\n        FFStream *const sti = ffstream(st);\n        if (st->start_time == AV_NOPTS_VALUE && sti->first_dts == AV_NOPTS_VALUE &&\n            is_relative(sti->cur_dts) && sti->cur_dts != RELATIVE_TS_BASE) {\n            st->start_time = 0;\n            if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && st->codecpar->sample_rate)\n                st->start_time = av_sat_add64(st->start_time, av_rescale_q(sti->skip_samples, (AVRational){1, st->codecpar->sample_rate}, st->time_base));\n            sti->start_time_generated = 1;\n        }\n    }\n$1#;
+' "${D}"
+    if ! grep -q "AetherEngine generated start time" "${D}" || ! grep -q "start_time_generated" "${I}" \
+        || [[ $(grep -c "sti->start_time_generated = 0" "${D}") -ne 2 ]]; then
+        echo "ERROR: generated start time patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
 patch_ffmpeg_dav1_tag() {
     # AetherEngine #547. MP4RA registers 'dav1' as the AV1 sample entry that signals
     # Dolby Vision, and Apple's HLS authoring spec requires it for Dolby Vision
@@ -1495,6 +1523,7 @@ patch_ffmpeg_pgssub
 patch_ffmpeg_visionos
 patch_ffmpeg_matroska_tts
 patch_ffmpeg_matroska_track_id
+patch_ffmpeg_generated_start_time
 patch_ffmpeg_vc1_parser
 patch_ffmpeg_dav1_tag
 patch_ffmpeg_mpegts_mpeg1_probe
