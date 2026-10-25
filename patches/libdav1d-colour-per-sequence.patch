@@ -1,0 +1,37 @@
+avcodec/libdav1d: each sequence header's own colour description
+
+libdav1d_init_params() copied primaries, transfer and matrix into the
+context only when a sequence header carried a colour description, so a
+later sequence header without one kept the previous header's values. AV1
+6.4.2 infers CP_UNSPECIFIED, TC_UNSPECIFIED and MC_UNSPECIFIED for a header
+without a description, and dav1d already writes those (2, FFmpeg's
+UNSPECIFIED) into the sequence header. Frames after such a header were
+labelled with a stale matrix: after an MC_IDENTITY sequence, 4:4:4 frames
+came out as GBR, and film grain clipped chroma at 235 where the reference
+clips at 240 (four of the Argon conformance streams).
+
+Copy the three values unconditionally, and map DAV1D_CHR_UNKNOWN to
+AVCHROMA_LOC_UNSPECIFIED instead of keeping the previous location.
+--- a/libavcodec/libdav1d.c
++++ b/libavcodec/libdav1d.c
+@@ -191,12 +191,15 @@
+     case DAV1D_CHR_COLOCATED:
+         c->chroma_sample_location = AVCHROMA_LOC_TOPLEFT;
+         break;
+-    }
+-    if (seq->color_description_present) {
+-        c->colorspace      = (enum AVColorSpace) seq->mtrx;
+-        c->color_primaries = (enum AVColorPrimaries) seq->pri;
+-        c->color_trc       = (enum AVColorTransferCharacteristic) seq->trc;
++    default:
++        c->chroma_sample_location = AVCHROMA_LOC_UNSPECIFIED;
++        break;
+     }
++    /* Every sequence header states its own colour: without a colour description
++     * the values are CP/TC/MC_UNSPECIFIED (AV1 6.4.2), which dav1d writes. */
++    c->colorspace      = (enum AVColorSpace) seq->mtrx;
++    c->color_primaries = (enum AVColorPrimaries) seq->pri;
++    c->color_trc       = (enum AVColorTransferCharacteristic) seq->trc;
+     c->color_range = seq->color_range ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+ 
+     if (seq->layout == DAV1D_PIXEL_LAYOUT_I444 && c->colorspace == AVCOL_SPC_RGB)

@@ -1,0 +1,49 @@
+avcodec/h264_slice: each SPS's own colour description
+
+The VUI's colour fields were copied into the context only when the SPS
+carried a video signal type and a colour description, so a later SPS
+without them kept the previous SPS's primaries, transfer, matrix and
+range: a broadcast channel switching from an HD programme tagged BT.709 to
+an untagged SD one kept BT.709, and a range the new SPS does not state
+stayed the old one. What an SPS leaves out is unspecified (H.264 E.2.1).
+
+Set the three colour values from every SPS, UNSPECIFIED when it carries no
+description, and the range from video_full_range_flag when the SPS has a
+video signal type, UNSPECIFIED when it has none (a container may still
+declare it). A matrix change still reinitialises, as before.
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -1114,16 +1114,23 @@
+ 
+         init_dimensions(h);
+ 
+-        if (sps->vui.video_signal_type_present_flag) {
+-            h->avctx->color_range = sps->vui.video_full_range_flag > 0 ? AVCOL_RANGE_JPEG
+-                                                                       : AVCOL_RANGE_MPEG;
+-            if (sps->vui.colour_description_present_flag) {
+-                if (h->avctx->colorspace != sps->vui.matrix_coeffs)
+-                    needs_reinit = 1;
+-                h->avctx->color_primaries = sps->vui.colour_primaries;
+-                h->avctx->color_trc       = sps->vui.transfer_characteristics;
+-                h->avctx->colorspace      = sps->vui.matrix_coeffs;
+-            }
++        /* Every SPS states its own colour: what its VUI leaves out is unspecified,
++         * not the previous SPS's (H.264 E.2.1). */
++        {
++            int described = sps->vui.video_signal_type_present_flag &&
++                            sps->vui.colour_description_present_flag;
++            enum AVColorSpace colorspace = described ? sps->vui.matrix_coeffs
++                                                     : AVCOL_SPC_UNSPECIFIED;
++            if (h->avctx->colorspace != colorspace)
++                needs_reinit = 1;
++            h->avctx->color_range = !sps->vui.video_signal_type_present_flag ? AVCOL_RANGE_UNSPECIFIED :
++                                    sps->vui.video_full_range_flag > 0      ? AVCOL_RANGE_JPEG
++                                                                            : AVCOL_RANGE_MPEG;
++            h->avctx->color_primaries = described ? sps->vui.colour_primaries
++                                                  : AVCOL_PRI_UNSPECIFIED;
++            h->avctx->color_trc       = described ? sps->vui.transfer_characteristics
++                                                  : AVCOL_TRC_UNSPECIFIED;
++            h->avctx->colorspace      = colorspace;
+         }
+ 
+         if (h->sei.common.alternative_transfer.present &&

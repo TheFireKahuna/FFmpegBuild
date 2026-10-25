@@ -1,0 +1,85 @@
+avcodec/h2645_sei: alternative transfer characteristics last one coded video sequence
+
+The alternative transfer characteristics SEI (preferred_transfer_
+characteristics, how HLG is signalled over a BT.2020 transfer, 3GPP TS
+26.118) persists in decoding order to the end of the CLVS (H.265 D.3) / the
+coded video sequence (H.264). The decoders never cleared it: once seen, it
+overrode the transfer of every later picture, an SDR programme after an HLG
+one included. And H.264 did not carry it between frame threads
+(ff_h2645_sei_ctx_replace), so with frame threading only the pictures
+decoded on the thread that parsed it took it.
+
+Track whether the message arrived with the current picture. A new coded
+video sequence without one ends it: HEVC at an IDR, a BLA or after an end
+of sequence (the transfer goes back to the SPS's), H.264 at an IDR picture
+(not its second field). Copy it between threads with the other persistent
+SEI state.
+--- a/libavcodec/h2645_sei.h
++++ b/libavcodec/h2645_sei.h
+@@ -80,6 +80,9 @@
+ typedef struct H2645SEIAlternativeTransfer {
+     int present;
+     int preferred_transfer_characteristics;
++    /* Set when the message arrives, cleared by the decoder once a picture has
++     * taken it: a new coded video sequence that starts without one ends it. */
++    int received;
+ } H2645SEIAlternativeTransfer;
+ 
+ typedef struct H2645SEIAmbientViewingEnvironment {
+--- a/libavcodec/h2645_sei.c
++++ b/libavcodec/h2645_sei.c
+@@ -381,6 +381,7 @@
+         return AVERROR_INVALIDDATA;
+ 
+     s->present = 1;
++    s->received = 1;
+     s->preferred_transfer_characteristics = bytestream2_get_byteu(gb);
+ 
+     return 0;
+@@ -578,6 +579,9 @@
+     dst->ambient_viewing_environment = src->ambient_viewing_environment;
+     dst->mastering_display     = src->mastering_display;
+     dst->content_light         = src->content_light;
++    /* Persistent to the end of the coded video sequence: every frame thread's
++     * pictures take it, not only the thread that parsed it. */
++    dst->alternative_transfer  = src->alternative_transfer;
+ 
+     av_refstruct_replace(&dst->film_grain_characteristics,
+                           src->film_grain_characteristics);
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -3328,6 +3328,17 @@
+             return ret;
+     }
+ 
++    /* The alternative transfer characteristics SEI persists to the end of the
++     * CLVS (H.265 D.3): a new one that starts without it goes back to the
++     * SPS's transfer. */
++    if (new_sequence && s->sei.common.alternative_transfer.present &&
++        !s->sei.common.alternative_transfer.received) {
++        s->sei.common.alternative_transfer.present = 0;
++        s->avctx->color_trc = sps->vui.common.colour_description_present_flag ?
++                              sps->vui.common.transfer_characteristics : AVCOL_TRC_UNSPECIFIED;
++    }
++    s->sei.common.alternative_transfer.received = 0;
++
+     ret = export_stream_params_from_sei(s);
+     if (ret < 0)
+         return ret;
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -1409,6 +1409,14 @@
+     const SPS *sps;
+ 
+     int last_pic_structure, last_pic_droppable, ret;
++
++    /* The alternative transfer characteristics SEI persists to the end of the
++     * coded video sequence: an IDR picture without one ends it. Not for a second
++     * field, whose SEI came with the first. */
++    if (nal->type == H264_NAL_IDR_SLICE && !h->first_field &&
++        !h->sei.common.alternative_transfer.received)
++        h->sei.common.alternative_transfer.present = 0;
++    h->sei.common.alternative_transfer.received = 0;
+ 
+     ret = h264_init_ps(h, sl, first_slice);
+     if (ret < 0)
