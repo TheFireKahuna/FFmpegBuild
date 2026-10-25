@@ -1615,6 +1615,50 @@ patch_ffmpeg_vt_pixel_buffer_attributes() {
     }
 }
 
+patch_ffmpeg_libdav1d_colour() {
+    # Each AV1 sequence header's own colour description: without one the values are
+    # unspecified (AV1 6.4.2), not the previous header's. The patch header explains the
+    # rest. Applies after patch_ffmpeg_libdav1d_get_buffer2 (same file).
+    local P="${SCRIPT_DIR}/patches/libdav1d-colour-per-sequence.patch"
+    if grep -q 'Every sequence header states its own colour' "${FFMPEG_SRC}/libavcodec/libdav1d.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: libdav1d colour per sequence header"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: libdav1d colour patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
+patch_ffmpeg_h264_colour() {
+    # Each H.264 SPS's own colour description and range: what an SPS leaves out is
+    # unspecified (H.264 E.2.1), not the previous SPS's.
+    local P="${SCRIPT_DIR}/patches/h264-colour-per-sps.patch"
+    if grep -q 'Every SPS states its own colour' "${FFMPEG_SRC}/libavcodec/h264_slice.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: H.264 colour per SPS"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: H.264 colour patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
+patch_ffmpeg_alternative_transfer() {
+    # The alternative transfer characteristics SEI lasts one coded video sequence (H.265
+    # D.3, H.264) and crosses frame threads. Applies after patch_ffmpeg_h264_colour
+    # (same file, h264_slice.c).
+    local P="${SCRIPT_DIR}/patches/h2645-alternative-transfer-cvs.patch"
+    if grep -q 'int received;' "${FFMPEG_SRC}/libavcodec/h2645_sei.h"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: alternative transfer SEI per coded video sequence"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: alternative transfer patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1638,6 +1682,9 @@ patch_ffmpeg_movenc_fragment_end
 patch_ffmpeg_dca_x_heights
 patch_ffmpeg_libdav1d_get_buffer2
 patch_ffmpeg_vt_pixel_buffer_attributes
+patch_ffmpeg_libdav1d_colour
+patch_ffmpeg_h264_colour
+patch_ffmpeg_alternative_transfer
 fetch_dav1d
 fetch_zimg
 fetch_zvbi
