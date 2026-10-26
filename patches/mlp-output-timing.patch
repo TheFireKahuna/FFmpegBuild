@@ -1,0 +1,46 @@
+diff --git a/libavcodec/mlpdec.c b/libavcodec/mlpdec.c
+index 580efc3..96983cf 100644
+--- a/libavcodec/mlpdec.c
++++ b/libavcodec/mlpdec.c
+@@ -138,6 +138,12 @@ typedef struct MLPDecodeContext {
+     /// Current access unit being read has a major sync.
+     int         is_major_sync_unit;
+ 
++    /// output_timing of the restart header read in the current access unit: the frame it plays at,
++    /// modulo 2^16, at the stream's rate. Stated on the access unit's frame as "mlp_output_timing".
++    uint16_t    output_timing;
++    /// Set once a restart header has been read in the current access unit.
++    uint8_t     output_timing_read;
++
+     /// Size of the major sync unit, in bytes
+     int         major_sync_header_size;
+ 
+@@ -551,7 +557,8 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
+         return AVERROR_INVALIDDATA;
+     }
+ 
+-    skip_bits(gbp, 16); /* Output timestamp */
++    m->output_timing      = get_bits(gbp, 16);
++    m->output_timing_read = 1;
+ 
+     min_channel        = get_bits(gbp, 4);
+     max_channel        = get_bits(gbp, 4);
+@@ -1153,6 +1160,10 @@ static int output_data(MLPDecodeContext *m, unsigned int substr,
+     frame->nb_samples = s->blockpos;
+     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+         return ret;
++    /* The stream's own presentation clock, on the frames whose access unit restates it. */
++    if (m->output_timing_read &&
++        (ret = av_dict_set_int(&frame->metadata, "mlp_output_timing", m->output_timing, 0)) < 0)
++        return ret;
+     s->lossless_check_data = m->pack_output(s->lossless_check_data,
+                                             s->blockpos,
+                                             m->sample_buffer,
+@@ -1206,6 +1217,7 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+     init_get_bits(&gb, (buf + 4), (length - 4) * 8);
+ 
+     m->is_major_sync_unit = 0;
++    m->output_timing_read = 0;
+     if (show_bits_long(&gb, 31) == (0xf8726fba >> 1)) {
+         if (read_major_sync(m, &gb) < 0)
+             goto error;

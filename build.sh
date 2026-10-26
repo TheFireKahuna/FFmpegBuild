@@ -1659,6 +1659,20 @@ patch_ffmpeg_alternative_transfer() {
     }
 }
 
+patch_ffmpeg_mlp_output_timing() {
+    # The TrueHD / MLP decoder states each restart header's output_timing (the stream's own
+    # presentation clock) on the access unit's frame, where upstream reads past it.
+    local P="${SCRIPT_DIR}/patches/mlp-output-timing.patch"
+    if grep -q 'mlp_output_timing' "${FFMPEG_SRC}/libavcodec/mlpdec.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: TrueHD output_timing on the decoded frame"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: MLP output timing patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1685,6 +1699,7 @@ patch_ffmpeg_vt_pixel_buffer_attributes
 patch_ffmpeg_libdav1d_colour
 patch_ffmpeg_h264_colour
 patch_ffmpeg_alternative_transfer
+patch_ffmpeg_mlp_output_timing
 fetch_dav1d
 fetch_zimg
 fetch_zvbi
