@@ -17,7 +17,7 @@ DAV1D_VERSION="1.5.4"
 DAV1D_REPO="https://code.videolan.org/videolan/dav1d.git"
 ZIMG_VERSION="release-3.0.6"
 ZIMG_REPO="https://github.com/sekrit-twc/zimg.git"
-ZVBI_VERSION="v0.2.45"
+ZVBI_VERSION="v0.2.46"
 ZVBI_REPO="https://github.com/zapping-vbi/zvbi.git"
 # Debug info for crash symbolication. `-gline-tables-only` carries function
 # names, file/line and inlined frames, which is everything a symbolicated crash
