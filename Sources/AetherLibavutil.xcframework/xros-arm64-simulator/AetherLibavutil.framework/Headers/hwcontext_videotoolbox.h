@@ -44,6 +44,17 @@
 
 typedef struct AVVTFramesContext {
     enum AVColorRange color_range;
+    /**
+     * Additional CVPixelBuffer attributes for the pictures the frames context's
+     * pool makes (a CFDictionaryRef, for example kCVPixelBufferMetalCompatibilityKey).
+     * The pixel format, width and height always come from the frames context;
+     * kCVPixelBufferIOSurfacePropertiesKey is set to an empty dictionary when this
+     * does not carry it.
+     *
+     * Set by the caller before av_hwframe_ctx_init(). The frames context owns
+     * one reference and releases it when it is freed.
+     */
+    CFDictionaryRef pixel_buffer_attributes;
 } AVVTFramesContext;
 
 /**
