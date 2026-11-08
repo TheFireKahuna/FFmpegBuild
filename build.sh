@@ -1846,6 +1846,23 @@ patch_ffmpeg_movenc_fragment_preroll() {
     }
 }
 
+patch_ffmpeg_movenc_frag_discont_before_check() {
+    # movflags frag_discont takes effect before movenc checks the packet's timestamps, so the
+    # first packet after it may start before the samples already written (a muxer primed with
+    # one frame keeps that packet's dts and pts). Applies after the other movenc patches (same
+    # file). An applied patch is told by reversing it: its check_pkt() line also occurs in
+    # ff_mov_write_packet(), so a grep cannot tell.
+    local P="${SCRIPT_DIR}/patches/movenc-frag-discont-before-check.patch"
+    if git -C "${FFMPEG_SRC}" apply --check -R "${P}" 2>/dev/null; then
+        return
+    fi
+    echo "→ Patching FFmpeg: movenc frag_discont before the timestamp check"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: movenc frag_discont patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1879,6 +1896,7 @@ patch_ffmpeg_mlp_output_timing
 patch_ffmpeg_matroska_export_cues
 patch_ffmpeg_mov_export_trex_count
 patch_ffmpeg_movenc_fragment_preroll
+patch_ffmpeg_movenc_frag_discont_before_check
 fetch_dav1d
 fetch_zimg
 fetch_zvbi

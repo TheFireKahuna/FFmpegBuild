@@ -1,0 +1,46 @@
+avformat/movenc: apply frag_discont before checking the packet's timestamps
+
+mov_write_single_packet() checked the packet with check_pkt() before it
+turned FF_MOV_FLAG_FRAG_DISCONT into the per-track frag_discont state, so
+the first packet after the flag was set was still checked against the end
+of the samples already written for its track (start_dts + track_duration).
+A packet starting before that end, which is what a discontinuity allows,
+was taken as out of order: its dts was moved to the end plus one and its
+pts dropped, and every later packet below the moved dts followed it.
+
+This is reached by a muxer whose moov is written early from one frame
+(delay_moov, a flush), after which frag_discont is set again and the real
+samples are written from their own timestamps: a first real packet inside
+the primed frame lost its timestamps.
+
+Apply the flag before the check, so the first packet of a discontinuous
+fragment is checked as the first packet of the track, as the check in
+ff_mov_write_packet() already does.
+
+diff --git a/libavformat/movenc.c b/libavformat/movenc.c
+index 92a0b6e..965f1d7 100644
+--- a/libavformat/movenc.c
++++ b/libavformat/movenc.c
+@@ -7257,10 +7257,7 @@ static int mov_write_single_packet(AVFormatContext *s, AVPacket *pkt)
+     AVCodecParameters *par = trk->par;
+     int64_t frag_duration = 0;
+     int size = pkt->size;
+-
+-    int ret = check_pkt(s, trk, pkt);
+-    if (ret < 0)
+-        return ret;
++    int ret;
+ 
+     if (mov->flags & FF_MOV_FLAG_FRAG_DISCONT) {
+         for (int i = 0; i < mov->nb_streams; i++)
+@@ -7268,6 +7265,10 @@ static int mov_write_single_packet(AVFormatContext *s, AVPacket *pkt)
+         mov->flags &= ~FF_MOV_FLAG_FRAG_DISCONT;
+     }
+ 
++    ret = check_pkt(s, trk, pkt);
++    if (ret < 0)
++        return ret;
++
+     if (mov->flags & FF_MOV_FLAG_NEGATIVE_CTS_OFFSETS) {
+         if (trk->dts_shift == AV_NOPTS_VALUE)
+             trk->dts_shift = pkt->pts - pkt->dts;
