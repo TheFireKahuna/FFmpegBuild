@@ -1,0 +1,24 @@
+mov: export the number of track extends boxes
+
+A file whose moov carries a movie extends box is fragmented: its samples
+live in movie fragments, not in the sample tables. The demuxer knows it as
+soon as it has read the moov (MOVContext.trex_count) but does not say so,
+and a caller that wants to tell a fragmented file from a plain one reads
+the boxes again.
+
+trex_count is a read-only exported option on the demuxer's private
+context, the number of trex boxes read: above 0 for a fragmented file.
+Read it with av_opt_get_int() on AVFormatContext.priv_data.
+
+diff --git a/libavformat/mov.c b/libavformat/mov.c
+index d837a8d..24736c4 100644
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -11872,6 +11872,7 @@ static const AVOption mov_options[] = {
+         {.i64 = 0}, 0, 1, FLAGS },
+     { "max_stts_delta", "treat offsets above this value as invalid", OFFSET(max_stts_delta), AV_OPT_TYPE_INT, {.i64 = UINT_MAX-48000*10 }, 0, UINT_MAX, .flags = AV_OPT_FLAG_DECODING_PARAM },
+     { "interleaved_read", "Interleave packets from multiple tracks at demuxer level", OFFSET(interleaved_read), AV_OPT_TYPE_BOOL, {.i64 = 1 }, 0, 1, .flags = AV_OPT_FLAG_DECODING_PARAM },
++    { "trex_count", "number of track extends boxes in the movie extends box, above 0 for a fragmented file", OFFSET(trex_count), AV_OPT_TYPE_UINT, {.i64 = 0 }, 0, UINT_MAX, .flags = AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
+ 
+     { NULL },
+ };

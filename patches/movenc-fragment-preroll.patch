@@ -1,0 +1,113 @@
+movenc: audio pre-roll sample group in fragments
+
+A decoder that starts on a fragment of an audio track with seek pre-roll
+needs to know that the first samples' output wants the packets before
+them. Apple's HLS writer states it as a fragment-local sample group of
+grouping type 'prol'; movenc writes the roll group of Opus and AAC only in
+the sample table of an unfragmented file.
+
+With the new movflags value frag_preroll each traf of an audio track whose
+codec parameters carry seek_preroll and frame_size, and that holds a
+sample which is not a sync sample, gets after its tfdt:
+
+  sgpd  version 1, grouping type 'prol', default_length 2, one entry:
+        roll_distance = seek_preroll / frame_size, rounded up
+  sbgp  version 0, grouping type 'prol', one run per change of sync
+        status: group_description_index 0x10001 (the first entry of this
+        fragment's sgpd) for the samples that are not sync samples, 0 for
+        sync samples
+
+A fragment of sync samples only gets neither box. The moof size pass
+accounts for the boxes, so trun data offsets stay right. Without the flag
+the output is unchanged, so stream-copied Opus, which carries
+seek_preroll, is not affected.
+
+--- a/libavformat/movenc.c
++++ b/libavformat/movenc.c
+@@ -113,6 +113,7 @@
+       { "write_colr", "Write colr atom even if the color info is unspecified (Experimental, may be renamed or changed, do not use from scripts)", 0, AV_OPT_TYPE_CONST, {.i64 = FF_MOV_FLAG_WRITE_COLR}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "movflags" },
+       { "write_gama", "Write deprecated gama atom", 0, AV_OPT_TYPE_CONST, {.i64 = FF_MOV_FLAG_WRITE_GAMA}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "movflags" },
+       { "hybrid_fragmented", "For recoverability, write a fragmented file that is converted to non-fragmented at the end.", 0, AV_OPT_TYPE_CONST, {.i64 = FF_MOV_FLAG_HYBRID_FRAGMENTED}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "movflags" },
++      { "frag_preroll", "Write an audio pre-roll sample group in each fragment of an audio track with seek pre-roll", 0, AV_OPT_TYPE_CONST, {.i64 = FF_MOV_FLAG_FRAG_PREROLL}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "movflags" },
+     { "min_frag_duration", "Minimum fragment duration", offsetof(MOVMuxContext, min_fragment_duration), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM},
+     { "mov_gamma", "gamma value for gama atom", offsetof(MOVMuxContext, gamma), AV_OPT_TYPE_FLOAT, {.dbl = 0.0 }, 0.0, 10, AV_OPT_FLAG_ENCODING_PARAM},
+     { "movie_timescale", "set movie timescale", offsetof(MOVMuxContext, movie_timescale), AV_OPT_TYPE_INT, {.i64 = MOV_TIMESCALE}, 1, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM},
+@@ -5706,7 +5707,57 @@
+     avio_wb64(pb, track->cluster[0].dts - track->start_dts);
+     return update_size(pb, pos);
+ }
++
++/* The fragment's audio pre-roll group: an sgpd of grouping type 'prol' with
++ * one entry, the packets a decoder decodes before a sample for full output
++ * (seek_preroll in packets of frame_size, rounded up), and an sbgp that puts
++ * every sample that is not a sync sample in it. A fragment of sync samples
++ * only gets neither box. */
++static int mov_write_prol_tags(AVIOContext *pb, MOVTrack *track)
++{
++    const AVCodecParameters *par = track->par;
++    int64_t roll;
++    int i, runs = 0, grouped = 0;
++
++    if (par->codec_type != AVMEDIA_TYPE_AUDIO || par->seek_preroll <= 0 || par->frame_size <= 0)
++        return 0;
++    for (i = 0; i < track->entry; i++) {
++        int sync = track->cluster[i].flags & MOV_SYNC_SAMPLE;
++        grouped |= !sync;
++        if (!i || !sync != !(track->cluster[i - 1].flags & MOV_SYNC_SAMPLE))
++            runs++;
++    }
++    if (!grouped)
++        return 0;
++    roll = FFMIN((par->seek_preroll + par->frame_size - 1) / par->frame_size, INT16_MAX);
+ 
++    avio_wb32(pb, 26); /* size */
++    ffio_wfourcc(pb, "sgpd");
++    avio_wb32(pb, 1 << 24); /* version 1, flags */
++    ffio_wfourcc(pb, "prol");
++    avio_wb32(pb, 2); /* default_length */
++    avio_wb32(pb, 1); /* entry_count */
++    avio_wb16(pb, roll); /* roll_distance */
++
++    avio_wb32(pb, 20 + 8 * runs); /* size */
++    ffio_wfourcc(pb, "sbgp");
++    avio_wb32(pb, 0); /* version 0, flags */
++    ffio_wfourcc(pb, "prol");
++    avio_wb32(pb, runs); /* entry_count */
++    for (i = 0; i < track->entry;) {
++        int sync = track->cluster[i].flags & MOV_SYNC_SAMPLE;
++        int count = 0;
++        while (i < track->entry && !(track->cluster[i].flags & MOV_SYNC_SAMPLE) == !sync) {
++            count++;
++            i++;
++        }
++        avio_wb32(pb, count); /* sample_count */
++        /* the first entry of this fragment's sgpd, or no group */
++        avio_wb32(pb, sync ? 0 : 0x10001); /* group_description_index */
++    }
++    return 0;
++}
++
+ static int mov_write_traf_tag(AVIOContext *pb, MOVMuxContext *mov,
+                               MOVTrack *track, int64_t moof_offset,
+                               int moof_size)
+@@ -5719,6 +5770,8 @@
+     mov_write_tfhd_tag(pb, mov, track, moof_offset);
+     if (mov->mode != MODE_ISM)
+         mov_write_tfdt_tag(pb, track);
++    if (mov->flags & FF_MOV_FLAG_FRAG_PREROLL)
++        mov_write_prol_tags(pb, track);
+     for (i = 1; i < track->entry; i++) {
+         if (track->cluster[i].pos != track->cluster[i - 1].pos + track->cluster[i - 1].size) {
+             mov_write_trun_tag(pb, mov, track, moof_size, start, i);
+diff --git a/libavformat/movenc.h b/libavformat/movenc.h
+index eb12551..54e469b 100644
+--- a/libavformat/movenc.h
++++ b/libavformat/movenc.h
+@@ -291,6 +291,7 @@ typedef struct MOVMuxContext {
+ #define FF_MOV_FLAG_CMAF                  (1 << 22)
+ #define FF_MOV_FLAG_PREFER_ICC            (1 << 23)
+ #define FF_MOV_FLAG_HYBRID_FRAGMENTED     (1 << 24)
++#define FF_MOV_FLAG_FRAG_PREROLL          (1 << 25)
+ 
+ int ff_mov_write_packet(AVFormatContext *s, AVPacket *pkt);
+ 
