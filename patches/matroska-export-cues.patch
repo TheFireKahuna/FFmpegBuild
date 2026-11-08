@@ -1,0 +1,214 @@
+matroskadec: option to read the Cues while opening and export them
+
+A player that serves a Matroska file in pieces (subtitle cues fetched by
+byte range, keyframes read on their own) needs the file's index with the
+fields libavformat parses and then drops: CueRelativePosition, which says
+where a block starts inside its cluster, and CueDuration. It also needs
+each track's ContentEncoding to undo zlib or header stripping on a block it
+reads itself. Without them it parses the Cues and Tracks a second time.
+
+export_cues (off by default) reads the Cues while the file opens, through
+the SeekHead as a seek would, instead of on the first seek, and exports
+three read-only values on the demuxer's private context:
+
+  cue_points       int64 array, five values per CueTrackPositions whose
+                   track became a stream, in file order: stream index,
+                   CueTime in segment ticks, cluster position from the
+                   start of the file, CueRelativePosition and CueDuration
+                   (-1 where absent). Empty unless the Cues parsed whole.
+  track_coding     int64 array, per stream with a ContentEncodings element,
+                   in stream order: stream index, number of ContentEncoding
+                   elements, then the first one's ContentEncodingType,
+                   ContentEncodingScope as coded, ContentCompAlgo, the size
+                   of ContentCompSettings and its bytes, one value each.
+  timestamp_scale  uint64, nanoseconds per segment tick.
+
+They are read with av_opt_get_array() and av_opt_get_int() on
+AVFormatContext.priv_data and freed with the context. The index the
+demuxer builds for seeking is unchanged; without the option nothing is
+exported and the Cues are still read on the first seek.
+
+--- a/libavformat/matroskadec.c
++++ b/libavformat/matroskadec.c
+@@ -320,6 +320,8 @@
+ typedef struct MatroskaIndexPos {
+     uint64_t track;
+     uint64_t pos;
++    uint64_t relative_pos;
++    uint64_t duration;
+ } MatroskaIndexPos;
+ 
+ typedef struct MatroskaIndex {
+@@ -442,6 +444,13 @@
+ 
+     /* Skip the Attachments element instead of reading it */
+     int skip_attachments;
++
++    /* Read the Cues while opening and export them with the track codings */
++    int export_cues;
++    int64_t *cue_points;
++    unsigned nb_cue_points;
++    int64_t *track_coding;
++    unsigned nb_track_coding;
+ } MatroskaDemuxContext;
+ 
+ #define CHILD_OF(parent) { .def = { .n = parent } }
+@@ -701,8 +710,8 @@
+ static EbmlSyntax matroska_index_pos[] = {
+     { MATROSKA_ID_CUETRACK,           EBML_UINT, 0, 0, offsetof(MatroskaIndexPos, track) },
+     { MATROSKA_ID_CUECLUSTERPOSITION, EBML_UINT, 0, 0, offsetof(MatroskaIndexPos, pos) },
+-    { MATROSKA_ID_CUERELATIVEPOSITION,EBML_NONE },
+-    { MATROSKA_ID_CUEDURATION,        EBML_NONE },
++    { MATROSKA_ID_CUERELATIVEPOSITION,EBML_UINT, 0, 0, offsetof(MatroskaIndexPos, relative_pos), { .u = UINT64_MAX } },
++    { MATROSKA_ID_CUEDURATION,        EBML_UINT, 0, 0, offsetof(MatroskaIndexPos, duration),     { .u = UINT64_MAX } },
+     { MATROSKA_ID_CUEBLOCKNUMBER,     EBML_NONE },
+     CHILD_OF(matroska_index_entry)
+ };
+@@ -2000,7 +2009,50 @@
+         }
+ 
+         elem->parsed = 1;
++    }
++}
++
++/* Five values per CueTrackPositions whose track became a stream, in file
++ * order: stream index, CueTime in segment ticks, cluster position from the
++ * start of the file, CueRelativePosition and CueDuration (-1 where absent).
++ * Only a Cues element that parsed whole is exported. */
++static int matroska_export_cue_points(MatroskaDemuxContext *matroska)
++{
++    EbmlList *index_list = &matroska->index;
++    MatroskaIndex *index = index_list->elem;
++    size_t count = 0;
++    int64_t *record;
++
++    av_freep(&matroska->cue_points);
++    matroska->nb_cue_points = 0;
++    if (matroska->cues_parsing_deferred)
++        return 0;
++    for (int i = 0; i < index_list->nb_elem; i++)
++        count += index[i].pos.nb_elem;
++    if (!count)
++        return 0;
++    if (count > UINT_MAX / 5)
++        return AVERROR(ENOMEM);
++    record = av_malloc_array(count * 5, sizeof(*record));
++    if (!record)
++        return AVERROR(ENOMEM);
++    matroska->cue_points = record;
++    for (int i = 0; i < index_list->nb_elem; i++) {
++        MatroskaIndexPos *pos = index[i].pos.elem;
++        for (int j = 0; j < index[i].pos.nb_elem; j++) {
++            MatroskaTrack *track = matroska_find_track_by_num(matroska, pos[j].track);
++            if (!track || !track->stream)
++                continue;
++            record[0] = track->stream->index;
++            record[1] = index[i].time;
++            record[2] = pos[j].pos + matroska->segment_start;
++            record[3] = pos[j].relative_pos == UINT64_MAX ? -1 : pos[j].relative_pos;
++            record[4] = pos[j].duration     == UINT64_MAX ? -1 : pos[j].duration;
++            record += 5;
++            matroska->nb_cue_points += 5;
++        }
+     }
++    return 0;
+ }
+ 
+ static void matroska_add_index_entries(MatroskaDemuxContext *matroska)
+@@ -2010,6 +2062,9 @@
+     uint64_t index_scale = 1;
+     int i, j;
+ 
++    if (matroska->export_cues && matroska_export_cue_points(matroska) < 0)
++        av_log(matroska->ctx, AV_LOG_WARNING, "Could not export the cue points.\n");
++
+     if (matroska->ctx->flags & AVFMT_FLAG_IGNIDX)
+         return;
+ 
+@@ -3134,6 +3189,38 @@
+     return 0;
+ }
+ 
++/* Per stream whose track has a ContentEncodings element, in stream order:
++ * stream index, number of ContentEncoding elements, then the first one's
++ * ContentEncodingType, ContentEncodingScope as coded, ContentCompAlgo, the
++ * size of ContentCompSettings and its bytes, one value each. */
++static int matroska_export_track_coding(MatroskaDemuxContext *matroska, int stream_index,
++                                        const MatroskaTrack *track, uint64_t coded_scope)
++{
++    const MatroskaTrackEncoding *encoding = track->encodings.elem;
++    const EbmlBin *settings = &encoding->compression.settings;
++    unsigned at = matroska->nb_track_coding;
++    int ret;
++
++    if (settings->size > UINT_MAX - 6 - at)
++        return AVERROR(ENOMEM);
++    ret = av_reallocp_array(&matroska->track_coding, at + 6 + settings->size,
++                            sizeof(*matroska->track_coding));
++    if (ret < 0) {
++        matroska->nb_track_coding = 0;
++        return ret;
++    }
++    matroska->track_coding[at++] = stream_index;
++    matroska->track_coding[at++] = track->encodings.nb_elem;
++    matroska->track_coding[at++] = encoding->type;
++    matroska->track_coding[at++] = coded_scope;
++    matroska->track_coding[at++] = encoding->compression.algo;
++    matroska->track_coding[at++] = settings->size;
++    for (int i = 0; i < settings->size; i++)
++        matroska->track_coding[at++] = settings->data[i];
++    matroska->nb_track_coding = at;
++    return 0;
++}
++
+ static int matroska_parse_tracks(AVFormatContext *s)
+ {
+     MatroskaDemuxContext *matroska = s->priv_data;
+@@ -3148,6 +3235,8 @@
+         int extradata_offset = 0;
+         AVStream *st;
+         char* key_id_base64 = NULL;
++        uint64_t coded_scope = track->encodings.nb_elem ?
++                               ((MatroskaTrackEncoding *)track->encodings.elem)->scope : 0;
+ 
+         /* Apply some sanity checks. */
+         if (track->type != MATROSKA_TRACK_TYPE_VIDEO &&
+@@ -3242,6 +3331,14 @@
+         st->id = (int)track->num;
+         par = st->codecpar;
+ 
++        if (matroska->export_cues && track->encodings.nb_elem) {
++            ret = matroska_export_track_coding(matroska, st->index, track, coded_scope);
++            if (ret < 0) {
++                av_free(key_id_base64);
++                return ret;
++            }
++        }
++
+         par->codec_id  = codec_id;
+ 
+         if (track->flag_default)
+@@ -3491,7 +3588,11 @@
+             max_start = chapters[i].start;
+         }
+ 
+-    matroska_add_index_entries(matroska);
++    if (matroska->export_cues && matroska->cues_parsing_deferred > 0) {
++        matroska->cues_parsing_deferred = 0;
++        matroska_parse_cues(matroska);
++    } else
++        matroska_add_index_entries(matroska);
+ 
+     matroska_convert_tags(s);
+ 
+@@ -4925,6 +5026,10 @@
+ 
+ static const AVOption matroska_options[] = {
+     { "skip_attachments", "skip the attached files instead of reading them while opening", offsetof(MatroskaDemuxContext, skip_attachments), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
++    { "export_cues", "read the Cues while opening and export them with the track codings", offsetof(MatroskaDemuxContext, export_cues), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
++    { "cue_points", "five values per CueTrackPositions of a stream: stream index, time, cluster position, relative position, duration", offsetof(MatroskaDemuxContext, cue_points), AV_OPT_TYPE_INT64 | AV_OPT_TYPE_FLAG_ARRAY, .min = INT64_MIN, .max = INT64_MAX, .flags = AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
++    { "track_coding", "the ContentEncoding of every stream that has one", offsetof(MatroskaDemuxContext, track_coding), AV_OPT_TYPE_INT64 | AV_OPT_TYPE_FLAG_ARRAY, .min = INT64_MIN, .max = INT64_MAX, .flags = AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
++    { "timestamp_scale", "nanoseconds per segment tick", offsetof(MatroskaDemuxContext, time_scale), AV_OPT_TYPE_UINT64, {.i64 = 0}, 0, UINT64_MAX, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
+     { NULL },
+ };
+ 

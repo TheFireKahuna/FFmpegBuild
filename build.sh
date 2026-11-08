@@ -1627,13 +1627,14 @@ patch_ffmpeg_dca_x_heights() {
     # DTS:X heights without LibDTSX (AetherEngine #798). The standard presentation of DTS:X
     # carries its four height channels in a regular XLL channel set at the end of every XLL
     # frame, which upstream recognises (it sets the "DTS-HD MA + DTS:X" profile) but skips.
-    # The patch decodes that set with the existing channel set code and adds a decoder option
-    # "x_heights" (off by default) that outputs 7.1.4: the bed as coded, with the heights
-    # still folded into it at -3 dB, next to the four heights. Nothing is taken out of the
-    # bed. Without the option the output is unchanged byte for byte. It lives in patches/ rather than inline: at this size a perl
-    # substitution would be unreadable. The patch header explains the format.
+    # The patch decodes that set with the existing channel set code, adds a decoder option
+    # "x_heights" (off by default) that outputs 7.1.4, and removes the -3 dB fold of each
+    # height from the bed speaker under it, rounded as the encoder rounded it. Without the
+    # option the output is unchanged byte for byte. It lives in patches/ rather than inline:
+    # at this size a perl substitution would be unreadable. The patch header explains the
+    # format.
     local P="${SCRIPT_DIR}/patches/dca-xll-x-heights.patch"
-    if grep -q '"x_heights"' "${FFMPEG_SRC}/libavcodec/dcadec.c"; then
+    if grep -q 'DCA_XLL_X_HEIGHT_FOLD' "${FFMPEG_SRC}/libavcodec/dca_xll.c"; then
         return
     fi
     echo "→ Patching FFmpeg: decode the DTS:X standard presentation's height channels (AetherEngine #798)"
@@ -1792,6 +1793,52 @@ patch_ffmpeg_mlp_output_timing() {
     }
 }
 
+patch_ffmpeg_matroska_export_cues() {
+    # export_cues (off by default): the matroska demuxer reads the Cues while opening and
+    # exports them with CueRelativePosition and CueDuration (cue_points), each stream's
+    # ContentEncoding (track_coding) and the TimestampScale, so a player reading blocks by
+    # byte range does not parse the Cues and Tracks a second time. The patch header gives
+    # the layouts. Applies after the other matroskadec patches (same file).
+    local P="${SCRIPT_DIR}/patches/matroska-export-cues.patch"
+    if grep -q '"export_cues"' "${FFMPEG_SRC}/libavformat/matroskadec.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: matroska export_cues option"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: matroska export_cues patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
+patch_ffmpeg_mov_export_trex_count() {
+    # The mov demuxer exports how many trex boxes the moov carried (trex_count, read-only):
+    # above 0 for a fragmented file.
+    local P="${SCRIPT_DIR}/patches/mov-export-trex-count.patch"
+    if grep -q '"trex_count"' "${FFMPEG_SRC}/libavformat/mov.c"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: mov exports trex_count"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: mov trex_count patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
+patch_ffmpeg_movenc_fragment_preroll() {
+    # movflags frag_preroll: each fragment of an audio track with seek pre-roll carries the
+    # 'prol' sample group (sgpd + sbgp) over its samples that are not sync samples, as
+    # Apple's HLS writer does. Applies after the other movenc patches (same file).
+    local P="${SCRIPT_DIR}/patches/movenc-fragment-preroll.patch"
+    if grep -q 'FF_MOV_FLAG_FRAG_PREROLL' "${FFMPEG_SRC}/libavformat/movenc.h"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: movenc frag_preroll"
+    git -C "${FFMPEG_SRC}" apply "${P}" || {
+        echo "ERROR: movenc frag_preroll patch did not apply (upstream source changed?)"
+        exit 1
+    }
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1822,6 +1869,9 @@ patch_ffmpeg_libdav1d_colour
 patch_ffmpeg_h264_colour
 patch_ffmpeg_alternative_transfer
 patch_ffmpeg_mlp_output_timing
+patch_ffmpeg_matroska_export_cues
+patch_ffmpeg_mov_export_trex_count
+patch_ffmpeg_movenc_fragment_preroll
 fetch_dav1d
 fetch_zimg
 fetch_zvbi
